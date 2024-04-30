@@ -11,18 +11,25 @@ MASTERPASSWORD_FILE="$SCRIPT_DIR/.master_password"
 PASSWORD_FILE="$SCRIPT_DIR/.passwords"
 TMP_PASS_FILE="$SCRIPT_DIR/tmp/encrypted_password"
 
+# Global variables to store user data
+name=""
+username=""
+password=""
+
 # Function to encrypt password
 encrypt_password() {
   local password="$1"
   local file="$2"
-  echo -n "$password" | openssl enc -aes-256-cbc -salt -pbkdf2 -out "$file" -pass pass:"$DECRYPTPASS"
+  echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -out "$file" -pass pass:"$DECRYPTPASS"
 }
 
 # Function to decrypt password
 decrypt_password() {
   local file="$1"
-  openssl enc -d -aes-256-cbc -salt -pbkdf2 -in "$file" -k "$DECRYPTPASS" | tr -d '\n'
+  openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$DECRYPTPASS" -in "$file"
 }
+
+
 
 # Function to check if master password is set
 check_master_password() {
@@ -48,7 +55,6 @@ create_master_password() {
   fi
 }
 
-# Function to ask for master password
 ask_master_password() {
   if [ ! -f "$MASTERPASSWORD_FILE" ]; then
     zenity --error --text="Master password not set. Please run the script again to set the master password."
@@ -56,11 +62,37 @@ ask_master_password() {
   fi
 
   entered_password=$(zenity --password --title="Enter Master Password")
+  
+  # Check return code to determine if the user clicked "Cancel"
+  if [ $? -ne 0 ]; then
+    zenity --error --text="Operation canceled. Exiting..."
+    exit 1
+  fi
+
   decrypted_password=$(decrypt_password "$MASTERPASSWORD_FILE")
+  
+  # Check if the entered password matches the decrypted master password
   if [ "$decrypted_password" != "$entered_password" ]; then
     zenity --error --text="Incorrect master password."
     ask_master_password
   fi
+}
+
+
+decrypt_from_list() {
+  # Get corresponding username and encrypted password using awk
+  details=$(awk -F'|' -v name="$name" '$1 == name {print $2, $3}' "$PASSWORD_FILE")
+
+  # Extract username and encrypted password
+  username=$(echo "$details" | cut -d ' ' -f 1)
+  encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
+
+  echo -n "$encrypted_password" > $TMP_PASS_FILE
+
+  # Decrypt the password
+  password=$(decrypt_password "$TMP_PASS_FILE")
+
+  rm -f $TMP_PASS_FILE
 }
 
 # Function to save new password
@@ -77,7 +109,8 @@ save_password() {
   password=$(echo "$response" | awk -F'|' '{print $3}')
 
   # Encrypt the password
-  password=$(echo -n "$password" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+  password=$(echo -n "$password" | tr -d '\n\t ')
+  password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
 
   # Append to the password file
   echo -n -e "\n$name|$username|$password" >> "$PASSWORD_FILE"
@@ -96,19 +129,7 @@ get_password() {
   # Display list of names for selection
   name=$(zenity --list --title="Select Name" --text="Choose a name:" --column="Name" $names)
 
-  # Get corresponding username and encrypted password using awk
-  details=$(awk -F'|' -v name="$name" '$1 == name {print $2, $3}' "$PASSWORD_FILE")
-
-  # Extract username and encrypted password
-  username=$(echo "$details" | cut -d ' ' -f 1)
-  encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
-
-  echo -n "$encrypted_password" > $TMP_PASS_FILE
-
-  # Decrypt the password
-  password=$(decrypt_password "$TMP_PASS_FILE")
-
-  rm -f $TMP_PASS_FILE
+  decrypt_from_list
 
   # Display username and password with option to copy
   zenity --info --title="Credentials for $name" --text="Username: $username\nPassword: $password\n\nClick OK to copy password to clipboard." && echo -n "$password" | xclip -selection clipboard
@@ -123,34 +144,58 @@ update_password() {
   names=$(cut -d '|' -f 1 "$PASSWORD_FILE")
 
   # Display list of names for selection
-  name=$(zenity --list --title="Select Name" --text="Choose a name to update:" --column="Name" $names)
+  name=$(zenity --list --title="Select Name" --text="Choose a name:" --column="Name" $names)
 
-  # Get current details
-  details=$(grep "^$name|" "$PASSWORD_FILE")
-  username=$(echo "$details" | cut -d '|' -f 2)
-  password=$(echo "$details" | cut -d '|' -f 3)
+  # Decrypt details for selected entry
+  decrypt_from_list
 
-  # Prompt for updated details
-  response=$(zenity --forms --title="Update Password" --text="Enter updated details:" \
-    --add-entry="Name:" --entry-text="$name" \
-    --add-entry="Username:" --entry-text="$username" \
-    --add-password="Password:" --entry-text="$password")
+  # Prompt for field to update
+  field=$(zenity --list --title="Update Password" --text="Choose the field to update:" --column="Field" "Name" "Username" "Password")
 
-  # Parse user input
-  new_name=$(echo "$response" | awk -F'|' '{print $1}')
-  new_username=$(echo "$response" | awk -F'|' '{print $2}')
-  new_password=$(echo "$response" | awk -F'|' '{print $3}')
+  case $field in
+    ("Name")
+      # Prompt for updated name
+      new_value=$(zenity --entry --title="Update Name" --text="Enter updated name:" --entry-text="$name")
+      ;;
+    ("Username")
+      # Prompt for updated username
+      new_value=$(zenity --entry --title="Update Username" --text="Enter updated username:" --entry-text="$username")
+      ;;
+    ("Password")
+      # Prompt for updated password
+      new_value=$(zenity --password --title="Update Password" --text="Enter updated password:" --entry-text="$password")
+      ;;
+    *)
+      zenity --error --text="Invalid option."
+      main_menu
+      return
+      ;;
+  esac
 
-  # Encrypt the password
-  new_password=$(echo -n "$new_password" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+  # Encrypt the new password if updating password field
+  if [ "$field" == "Password" ]; then
+    new_value=$(echo -n "$new_value" | openssl aes-256-cbc -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+  fi
 
-  # Update password file
-  sed -i "s/^$name|.*$/$new_name|$new_username|$new_password/" "$PASSWORD_FILE"
+  # Update the corresponding field in the password file
+  sed -i "/^$name|/d" "$PASSWORD_FILE"
+  case $field in
+    ("Name")
+      echo -n -e "\n$new_value|$username|$password" >> "$PASSWORD_FILE"
+      ;;
+    ("Username")
+      echo -n -e "\n$name|$new_value|$password" >> "$PASSWORD_FILE"
+      ;;
+    ("Password")
+      echo -n -e "\n$name|$username|$new_value" >> "$PASSWORD_FILE"
+      ;;
+  esac
 
-  zenity --info --text="Password updated successfully."
+  zenity --info --text="Field updated successfully."
 
   main_menu
 }
+
 
 
 # Function to delete password
