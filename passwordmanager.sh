@@ -34,7 +34,7 @@ decrypt_password() {
 # Function to check if master password is set
 check_master_password() {
   if [ ! -f "$MASTERPASSWORD_FILE" ]; then
-    # If the flag file doesn't exist, it means this is the first time running the app
+    # If the file doesn't exist, it means this is the first time running the app
     create_master_password
   else
     # If the flag file exists, it means the master password has been set
@@ -46,7 +46,9 @@ check_master_password() {
 create_master_password() {
   master_password=$(zenity --password --title="Create Master Password")
   if [ -n "$master_password" ]; then
+    DECRYPTPASS="dummy" # Set the default decrypt password
     encrypt_password "$master_password" "$MASTERPASSWORD_FILE"
+    DECRYPTPASS="$master_password" # Set the new decrypt password
   else
     if [ -z "$master_password" ]; then
       zenity --error --text="Master password cannot be empty."
@@ -69,6 +71,8 @@ ask_master_password() {
     exit 1
   fi
 
+  DECRYPTPASS="dummy" # Set the default decrypt password
+
   decrypted_password=$(decrypt_password "$MASTERPASSWORD_FILE")
   
   # Check if the entered password matches the decrypted master password
@@ -76,6 +80,7 @@ ask_master_password() {
     zenity --error --text="Incorrect master password."
     ask_master_password
   fi
+  DECRYPTPASS="$decrypted_password" # Set the new decrypt password
 }
 
 
@@ -87,7 +92,7 @@ decrypt_from_list() {
   username=$(echo "$details" | cut -d ' ' -f 1)
   encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
 
-  echo -n "$encrypted_password" > $TMP_PASS_FILE
+  echo -n "$encrypted_password" > "$TMP_PASS_FILE" && echo >> "$TMP_PASS_FILE" # Add newline character at the end
 
   # Decrypt the password
   password=$(decrypt_password "$TMP_PASS_FILE")
@@ -129,6 +134,13 @@ get_password() {
   # Display list of names for selection
   name=$(zenity --list --title="Select Name" --text="Choose a name:" --column="Name" $names)
 
+  # Check if user clicked "Cancel" or closed the dialog without selecting an option
+  if [ -z "$name" ]; then
+    zenity --info --title="No Option Selected" --text="You did not select any option."
+    main_menu
+    return
+  fi
+
   decrypt_from_list
 
   # Display username and password with option to copy
@@ -145,6 +157,13 @@ update_password() {
 
   # Display list of names for selection
   name=$(zenity --list --title="Select Name" --text="Choose a name:" --column="Name" $names)
+
+  # Check if user clicked "Cancel" or closed the dialog without selecting an option
+  if [ -z "$name" ]; then
+    zenity --info --title="No Option Selected" --text="You did not select any option."
+    main_menu
+    return
+  fi
 
   # Decrypt details for selected entry
   decrypt_from_list
@@ -163,7 +182,7 @@ update_password() {
       ;;
     ("Password")
       # Prompt for updated password
-      new_value=$(zenity --password --title="Update Password" --text="Enter updated password:" --entry-text="$password")
+      new_value=$(zenity --entry --title="Update Password" --text="Enter updated password:" --entry-text="$password")
       ;;
     *)
       zenity --error --text="Invalid option."
@@ -172,10 +191,23 @@ update_password() {
       ;;
   esac
 
+  # Check if new_value is empty
+  if [ -z "$new_value" ]; then
+    zenity --info --title="Empty Field" --text="The field cannot be empty."
+    main_menu
+    return
+  fi
+
   # Encrypt the new password if updating password field
   if [ "$field" == "Password" ]; then
-    new_value=$(echo -n "$new_value" | openssl aes-256-cbc -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+    new_value=$(echo -n "$new_value" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+  else 
+    # Encrypt the password
+    password=$(echo -n "$password" | tr -d '\n\t ')
+    password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
   fi
+
+  
 
   # Update the corresponding field in the password file
   sed -i "/^$name|/d" "$PASSWORD_FILE"
@@ -195,6 +227,7 @@ update_password() {
 
   main_menu
 }
+
 
 
 
@@ -219,12 +252,21 @@ delete_password() {
 change_master_password() {
   # Ask for the current master password
   current_password=$(zenity --password --title="Enter your current master password:")
+  
+  # Check if the user clicked "Cancel"
+  if [ -z "$current_password" ]; then
+    main_menu
+    return
+  fi
+
+  DECRYPTPASS="dummy" # Set the default decrypt password
 
   # Verify the entered password
   decrypted_password=$(decrypt_password "$MASTERPASSWORD_FILE")
   if [ "$decrypted_password" != "$current_password" ]; then
     zenity --error --text="Incorrect master password."
     main_menu
+    return
   fi
 
   # If the password is correct, delete the encrypted master password file
@@ -233,9 +275,22 @@ change_master_password() {
   # Run create_master_password to set a new master password
   create_master_password
 
+  # Re-encrypt the password file with the new master password
+  if [ -f "$PASSWORD_FILE" ]; then
+    while IFS= read -r line; do
+      name=$(echo "$line" | cut -d '|' -f 1)
+      username=$(echo "$line" | cut -d '|' -f 2)
+      encrypted_password=$(echo "$line" | cut -d '|' -f 3)
+      password=$(decrypt_password <(echo -n "$encrypted_password"))
+      password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+      echo -n -e "\n$name|$username|$password" >> "$PASSWORD_FILE"
+    done < "$PASSWORD_FILE"
+  fi
+
   zenity --info --text="Master password changed successfully."
   main_menu
 }
+
 
 # Function to generate new password
 generate_new_password() {
