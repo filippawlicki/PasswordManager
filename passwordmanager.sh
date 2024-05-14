@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 LOGGED=0
 # Set the password to decrypt the master password
 DECRYPTPASS="dummy"
@@ -9,7 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Path to store the flag indicating whether the master password has been set
 MASTERPASSWORD_FILE="$SCRIPT_DIR/.master_password"
 PASSWORD_FILE="$SCRIPT_DIR/.passwords"
-TMP_PASS_FILE="$SCRIPT_DIR/tmp/encrypted_password"
+TMP_PASS_DIR="$SCRIPT_DIR/tmp"
+TMP_PASS_FILE="$TMP_PASS_DIR/encrypted_password"
 
 # Global variables to store user data
 name=""
@@ -28,6 +28,25 @@ decrypt_password() {
   local file="$1"
   openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$DECRYPTPASS" -in "$file"
 }
+
+store_encrypted_password() {
+  local encrypted_password="$1"
+
+  # Check if "tmp" directory exists, create if not
+  if [ ! -d "$TMP_PASS_DIR" ]; then
+    mkdir "$TMP_PASS_DIR" || { echo "Error: Failed to create 'tmp' directory."; return 1; }
+  fi
+
+  # Write encrypted password to temporary file with a newline character
+  echo -n "$encrypted_password" > "$TMP_PASS_FILE" && echo >> "$TMP_PASS_FILE"
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to write encrypted password to '$TMP_PASS_FILE'."
+    return 1
+  fi
+
+  return 0
+}
+
 
 
 
@@ -92,7 +111,7 @@ decrypt_from_list() {
   username=$(echo "$details" | cut -d ' ' -f 1)
   encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
 
-  echo -n "$encrypted_password" > "$TMP_PASS_FILE" && echo >> "$TMP_PASS_FILE" # Add newline character at the end
+  store_encrypted_password "$encrypted_password"
 
   # Decrypt the password
   password=$(decrypt_password "$TMP_PASS_FILE")
@@ -268,7 +287,9 @@ change_master_password() {
     main_menu
     return
   fi
-
+  
+  OLD_DECRYPTPASS="$decrypted_password" # Store the old decrypt password
+  
   # If the password is correct, delete the encrypted master password file
   rm -f "$MASTERPASSWORD_FILE"
 
@@ -276,16 +297,20 @@ change_master_password() {
   create_master_password
 
   # Re-encrypt the password file with the new master password
+  $NEW_PASSWORD_FILE="$SCRIPT_DIR/.new_passwords"
   if [ -f "$PASSWORD_FILE" ]; then
     while IFS= read -r line; do
       name=$(echo "$line" | cut -d '|' -f 1)
       username=$(echo "$line" | cut -d '|' -f 2)
       encrypted_password=$(echo "$line" | cut -d '|' -f 3)
-      password=$(decrypt_password <(echo -n "$encrypted_password"))
+      $password= openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$OLD_DECRYPTPASS" -in <(echo -n "$encrypted_password")
       password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
-      echo -n -e "\n$name|$username|$password" >> "$PASSWORD_FILE"
+      echo -n -e "\n$name|$username|$password" >> "$NEW_PASSWORD_FILE"
     done < "$PASSWORD_FILE"
   fi
+
+  mv "$NEW_PASSWORD_FILE" "$PASSWORD_FILE"
+  rm -f "$NEW_PASSWORD_FILE"
 
   zenity --info --text="Master password changed successfully."
   main_menu
