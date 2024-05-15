@@ -127,10 +127,30 @@ save_password() {
     --add-entry="Username:" \
     --add-password="Password:")
 
+  # Check if user clicked "Cancel" or closed the dialog without entering any details
+  if [ -z "$response" ]; then
+    main_menu
+    return
+  fi
+
+  # Check if any field contains more than one "|" character
+  if echo "$response" | grep -q -E '(\|.*?){3,}'; then
+    zenity --info --text="Fields cannot contain '|' character."
+    main_menu
+    return
+  fi
+
   # Parse user input
   name=$(echo "$response" | awk -F'|' '{print $1}')
   username=$(echo "$response" | awk -F'|' '{print $2}')
   password=$(echo "$response" | awk -F'|' '{print $3}')
+
+  # Check if any field is empty
+  if [ -z "$name" ] || [ -z "$username" ] || [ -z "$password" ]; then
+    zenity --info --text="Fields cannot be empty."
+    main_menu
+    return
+  fi
 
   # Encrypt the password
   password=$(echo -n "$password" | tr -d '\n\t ')
@@ -258,10 +278,21 @@ delete_password() {
   # Display list of names for selection
   name=$(zenity --list --title="Select Name" --text="Choose a name to delete:" --column="Name" $names)
 
+  # Check if user clicked "Cancel" or closed the dialog without selecting an option
+  if [ -z "$name" ]; then
+    zenity --info --text="No password selected for deletion."
+    main_menu
+    return
+  fi
+
   # Confirm deletion
-  zenity --question --text="Are you sure you want to delete the password for $name?" && \
-  sed -i "/^$name|/d" "$PASSWORD_FILE" && \
-  zenity --info --text="Password for $name deleted successfully."
+  zenity --question --text="Are you sure you want to delete the password for $name?"
+  if [ "$?" -eq 0 ]; then
+    sed -i "/^$name|/d" "$PASSWORD_FILE"
+    zenity --info --text="Password for $name deleted successfully."
+  else
+    zenity --info --text="Password deletion canceled."
+  fi
 
   main_menu
 }
@@ -296,21 +327,55 @@ change_master_password() {
   # Run create_master_password to set a new master password
   create_master_password
 
+
+  # Check if "tmp" directory exists, create if not
+  if [ ! -d "$TMP_PASS_DIR" ]; then
+    mkdir "$TMP_PASS_DIR" || { echo "Error: Failed to create 'tmp' directory."; return 1; }
+  fi
+
   # Re-encrypt the password file with the new master password
-  $NEW_PASSWORD_FILE="$SCRIPT_DIR/.new_passwords"
+  NEW_PASSWORD_FILE="$TMP_PASS_DIR/.new_passwords"
+  echo -n -e "" > "$NEW_PASSWORD_FILE"
   if [ -f "$PASSWORD_FILE" ]; then
     while IFS= read -r line; do
+      if [[ "$line" != *'|'*'|'* ]]; then
+        continue
+      fi
       name=$(echo "$line" | cut -d '|' -f 1)
-      username=$(echo "$line" | cut -d '|' -f 2)
-      encrypted_password=$(echo "$line" | cut -d '|' -f 3)
-      $password= openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$OLD_DECRYPTPASS" -in <(echo -n "$encrypted_password")
+      details=$(awk -F'|' -v name="$name" '$1 == name {print $2, $3}' "$PASSWORD_FILE")
+
+      # Extract username and encrypted password
+      username=$(echo "$details" | cut -d ' ' -f 1)
+      encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
+
+      store_encrypted_password "$encrypted_password"
+
+      # Decrypt the password
+      password=$(openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$OLD_DECRYPTPASS" <<< "$encrypted_password")
+
+      rm -f $TMP_PASS_FILE
       password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
       echo -n -e "\n$name|$username|$password" >> "$NEW_PASSWORD_FILE"
     done < "$PASSWORD_FILE"
-  fi
+    # Add an extra line to handle the last password
+    name=$(echo "$line" | cut -d '|' -f 1)
+    details=$(awk -F'|' -v name="$name" '$1 == name {print $2, $3}' "$PASSWORD_FILE")
 
-  mv "$NEW_PASSWORD_FILE" "$PASSWORD_FILE"
-  rm -f "$NEW_PASSWORD_FILE"
+    # Extract username and encrypted password
+    username=$(echo "$details" | cut -d ' ' -f 1)
+    encrypted_password=$(echo "$details" | cut -d ' ' -f 2)
+
+    store_encrypted_password "$encrypted_password"
+
+    # Decrypt the password
+    password=$(openssl aes-256-cbc -d -a -pbkdf2 -pass pass:"$OLD_DECRYPTPASS" <<< "$encrypted_password")
+
+    rm -f $TMP_PASS_FILE
+    password=$(echo -n "$password" | openssl aes-256-cbc -a -salt -pbkdf2 -pass pass:"$DECRYPTPASS")
+    echo -n -e "\n$name|$username|$password" >> "$NEW_PASSWORD_FILE"
+
+    mv "$NEW_PASSWORD_FILE" "$PASSWORD_FILE"
+  fi
 
   zenity --info --text="Master password changed successfully."
   main_menu
@@ -404,5 +469,36 @@ main_menu() {
       ;;
   esac
 }
+
+while getopts ":vh" opt; do
+  case $opt in
+    v)
+      echo "Version: 1.0"
+      echo "Author: Filip Pawlicki"
+      exit 0
+      ;;
+    h)
+      echo "Help: This script allows you to manage and generates passwords."
+      echo "Usage: passwordmanager.sh [OPTIONS]"
+      echo "Options:"
+      echo "  -v    Display version and author information"
+      echo "  -h    Display help"
+      echo "Note: If no options are provided, the script will run in interactive mode."
+      echo "Description:"      
+      echo "      The script will prompt you to set a master password if it's the first time running."
+      echo "      The master password is used to encrypt and decrypt the passwords."
+      echo "      The encrypted passwords are stored in a file named '.passwords' in the same directory as the script."
+      echo "      The script uses 'zenity' for GUI dialogs and 'xclip' to copy passwords to clipboard."
+      echo "      It also uses 'openssl' to encrypt and decrypt passwords and 'awk' for parsing user input."
+      echo "      Make sure to have 'zenity', 'xclip', 'openssl' and 'awk' installed on your system."
+      exit 0
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG"
+      echo "Try 'passwordmanager.sh -h' for more information."
+      exit 1
+      ;;
+  esac
+done
 
 main_menu
