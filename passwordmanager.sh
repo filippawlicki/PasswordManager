@@ -14,8 +14,8 @@
 #
 # 	openssl: For encryption and decryption
 # 	zenity: For creating a user interface
-#	xclip: For copy passwords to clipboard
-#	awk: For parsing user input
+#	  xclip: For copy passwords to clipboard
+#	  awk and tr: For parsing user input
 #
 # Functions:
 #
